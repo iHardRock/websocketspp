@@ -1,4 +1,5 @@
 #pragma once
+#include <arpa/inet.h>
 #include <cstring>
 #include <cstdint>
 #include <memory>
@@ -8,50 +9,179 @@
 #include <libwebsockets.h>
 #include <uuidpp.h>
 namespace websocketspp {
-  class WebSocketSession;
-  typedef std::shared_ptr<WebSocketSession> PWebSocketSession;
+  //! WebSocket instance
+  class WebSocket;
 
+  //! Pointer to WebSocket instance
+  typedef std::shared_ptr<WebSocket> PWebSocket;
 
   //! WebSocket session
-  class WebSocketSession : public std::enable_shared_from_this<WebSocketSession> {
+  class WebSocketSession;
+
+  //! Pointer to WebSocket session
+  typedef std::shared_ptr<WebSocketSession> PWebSocketSession;
+
+  //! WebSocket server
+  template < class SessionType > class WebSocketServer;
+
+  //! WebSocket client
+  class WebSocketClient;
+
+  //! WebSocket base class
+  class WebSocket : public std::enable_shared_from_this<WebSocket> {
   public:
-    //! Session mode
+    //! WebSocket mode
     enum class Mode {
+      //! Unknown mode
       Unknown,
+      //! Server-side WebSocket
       Server,
+      //! Client-side WebSocket
       Client
+    };
+
+    //! WebSocket running state
+    enum class RunningState {
+      Stopped,
+      Starting,
+      Running,
+      Stopping,
     };
 
   private:
     //! WebSocket mode
-    Mode                _mode;
+    Mode            _mode;
 
-    //! Session object
-    lws*                _session;
+    //! Context
+    lws_context*    _context;
 
-    //! Session identifier
-    UUID                _session_id;
+    //! WebSocket state
+    RunningState    _state;
 
+  protected:
+
+    //! Access LWS context
+    lws_context* getContext() const {
+      return _context;
+    }
+
+    //! Set LWS context
+    void setContext(lws_context* context) {
+      _context = context;
+    }
+
+    //! Destroy context
+    void destoryContext() {
+      // - Destroy context
+      if (_context) {
+        lws_context_destroy(_context);
+        _context = nullptr;
+      }
+    }
+
+    //! Set running state
+    void setRunningState(RunningState state) {
+      _state = state;
+    }
 
   public:
 
     //! Default constructor
-    WebSocketSession()
+    WebSocket()
     : _mode(Mode::Unknown)
-    , _session(nullptr) {
-
-    }
+    , _context(nullptr)
+    , _state(RunningState::Stopped)
+    {}
 
     //! Constructor
-    WebSocketSession(lws* session, const UUID& session_id, Mode mode)
+    WebSocket(Mode mode)
     : _mode(mode)
-    , _session(session)
-    , _session_id(session_id) {
+    , _context(nullptr)
+    , _state(RunningState::Stopped)
+    {}
 
+    //! Destructor
+    virtual ~WebSocket() {
+      destoryContext();
+    }
+
+    //! Get pointer to socket
+    PWebSocket pointer() {
+      return shared_from_this();
     }
 
     //! Get WebSocket mode
     Mode getMode() const {
+      return _mode;
+    }
+
+    //! Get running state
+    RunningState getRunningState() const {
+      return _state;
+    }
+
+  public:
+    //! Start WebSocket
+    virtual bool start() = 0;
+
+    //! Update WebSocket
+    virtual void update() = 0;
+
+    //! Stop WebSocket
+    virtual bool stop()  = 0;
+
+    //! On new session connected
+    virtual void onConnected(PWebSocketSession session)
+    {}
+
+    //! On session disconnected
+    virtual void onDisconnected(PWebSocketSession session)
+    {}
+
+    //! On data received
+    virtual void onReceive(PWebSocketSession session, const std::uint8_t* buffer, std::size_t buffer_size, std::size_t awaiting_size)
+    {}
+  };
+
+  //! WebSocket session
+  class WebSocketSession : public std::enable_shared_from_this<WebSocketSession> {
+  template <class SessionType> friend class WebSocketServer;
+  private:
+    //! WebSocket mode
+    WebSocket::Mode           _mode;
+
+    //! Session object
+    lws*                      _session;
+
+    //! Session identifier
+    UUID                      _session_id;
+
+    //! Associated websocket
+    PWebSocket                _socket;
+
+    //! TX Buffer
+    std::vector<std::uint8_t> _tx_buffer;
+  private:
+
+    //! Initialize session at creation
+    void __init__(lws* session, const UUID& session_id, WebSocket::Mode mode, PWebSocket socket_ptr) {
+      _mode       = mode;
+      _session    = session;
+      _session_id = session_id;
+      _socket     = socket_ptr;
+      _tx_buffer.resize(LWS_PRE + 2);
+    }
+
+  public:
+
+    //! Constructor
+    WebSocketSession()
+    : _mode(WebSocket::Mode::Unknown)
+    , _session(nullptr)
+    {}
+
+    //! Get WebSocket mode
+    WebSocket::Mode getMode() const {
       return _mode;
     }
 
@@ -60,21 +190,67 @@ namespace websocketspp {
       return shared_from_this();
     }
 
+    //! Get pointer to socket
+    PWebSocket getWebSocket() {
+      return _socket;
+    }
+
     //! Get session identifier
     const UUID& getSessionId() const {
       return _session_id;
     }
 
-
     //! Send data
-    void send(const std::uint8_t* buffer, std::size_t buffer_size) {
-      lws_write(_session, const_cast<unsigned char*>(buffer), buffer_size, LWS_WRITE_TEXT);
+    bool send(const std::uint8_t* buffer, std::size_t buffer_size, bool binary_mode = false) {
+      // - Bytes sent counter
+      std::size_t bytes_sent = 0;
+
+      // - Is message chunked
+      bool chunked = false;
+
+      // - Send splitted to chunks by TX buffer size
+      while (buffer_size) {
+        // - Calculate portion size
+        std::size_t portion_size = std::min(buffer_size, _tx_buffer.size() - LWS_PRE);
+
+        // - Copy next portion into buffer
+        memcpy(&_tx_buffer[LWS_PRE], &buffer[bytes_sent], portion_size);
+
+        // - Check is need more chunks
+        bool more_chunks = (buffer_size - portion_size);
+
+        // - Setup flags
+        lws_write_protocol flags = binary_mode ? LWS_WRITE_BINARY : LWS_WRITE_TEXT;
+
+        // - Send continuation frame if chunked
+        if (chunked) flags = more_chunks
+          ? static_cast<lws_write_protocol>(LWS_WRITE_CONTINUATION | LWS_WRITE_NO_FIN)  // - Need more chunks
+          : static_cast<lws_write_protocol>(LWS_WRITE_CONTINUATION)                     // - Last chunk
+        ;
+
+        // - Detect first chunk
+        if (more_chunks && !chunked) {
+          flags   =  (lws_write_protocol)((int)flags | LWS_WRITE_NO_FIN);               // - First chunk
+          chunked = true;
+        }
+
+        // - Send data
+        if (lws_write(_session, &_tx_buffer[LWS_PRE], portion_size, flags ) == -1) {
+          // - TODO: Close connection
+          return false;
+        }
+
+        // - Go to next chunk
+        bytes_sent  += portion_size;
+        buffer_size -= portion_size;
+      }
+      return true;
     }
+
+  public:
 
     //! On connection established
-    virtual void onConnected() {
-
-    }
+    virtual void onConnected() {}
 
     //! On data received
     virtual void onReceive(const std::uint8_t* buffer, std::size_t buffer_size, std::size_t awaiting_size) {
@@ -82,11 +258,12 @@ namespace websocketspp {
     }
 
     //! On connection closed
-    virtual void onDisconnected() {
+    virtual void onDisconnected() {}
 
+    //! On disconnect packet received
+    virtual bool onDisconnectRequested() {
+      return true;
     }
-
-
   };
 
   //! WebSocket protocol information
@@ -159,77 +336,13 @@ namespace websocketspp {
     }
   };
 
-
-
-  //! WebSocket base class
-  class WebSocket {
-  public:
-
-  private:
-    //! WebSocket mode
-    WebSocketSession::Mode    _mode;
-
-    //! Context
-    lws_context*              _context;
-
-  protected:
-
-    //! Access LWS context
-    lws_context* getContext() {
-      return _context;
-    }
-
-    //! Set LWS context
-    void setContext(lws_context* context) {
-      _context = context;
-    }
-
-  public:
-
-    //! Default constructor
-    WebSocket()
-    : _mode(WebSocketSession::Mode::Unknown)
-    , _context(nullptr) {
-
-    }
-
-    //! Constructor
-    WebSocket(WebSocketSession::Mode mode)
-    : _mode(mode)
-    , _context(nullptr) {
-
-    }
-
-    //! Destructor
-    virtual ~WebSocket() {
-      // - Destroy context
-      if (_context) {
-        lws_context_destroy(_context);
-        _context = nullptr;
-      }
-    }
-
-    //! Get WebSocket mode
-    WebSocketSession::Mode getMode() const {
-      return _mode;
-    }
-
-    //! On WebSocket event triggered
-    int __onEvent__(lws_callback_reasons reason, void* arg, void* payload, std::size_t payload_len) {
-      switch (reason) {
-        default:
-          break;
-      }
-      return 0;
-    }
-
-
-  };
-
-
-
   //! WebSocket server
+  template < class SessionType >
   class WebSocketServer : public WebSocket {
+  public:
+    //! Pointer to WebSocket
+    typedef std::shared_ptr<WebSocketServer<SessionType>> ptr;
+
   private:
     //! Context creation info
     lws_context_creation_info                 _context_options;
@@ -255,6 +368,9 @@ namespace websocketspp {
     //! Active sessions mutex
     std::mutex                                _sessions_mutex;
 
+    //! Update timeout
+    std::uint32_t                             _update_timeout;
+
   private:
 
     //! Access LWS context information
@@ -267,18 +383,18 @@ namespace websocketspp {
       return _protocols_plain.data();
     }
 
-
     //! Create new session
     void createSession(lws* wsi) {
       // - Create session object
-      PWebSocketSession session = std::make_shared<WebSocketSession>(wsi, UUID::generate(), getMode());
+      PWebSocketSession session = std::make_shared<SessionType>();
+      session->__init__(wsi, UUID::generate(), getMode(), pointer());
+
+      // - Register session
       { std::lock_guard<std::mutex> lock(_sessions_mutex);
-        // - Register session
        _sessions_by_id[session->getSessionId()] = session;
        _sessions_by_wsi[wsi] = session;
       }
     }
-
 
     //! Unregister session from server
     void destorySession(lws* wsi) {
@@ -302,7 +418,6 @@ namespace websocketspp {
       if (i_session == _sessions_by_wsi.end()) return nullptr;
       else return i_session->second;
     }
-
 
     //! WebSocket callback
     static int __callback_function__(lws* wsi, lws_callback_reasons reason, void* user_data, void* payload, std::size_t payload_size) {
@@ -329,23 +444,59 @@ namespace websocketspp {
           server->createSession(wsi);
           break;
 
-
-
         case LWS_CALLBACK_PROTOCOL_INIT:
           printf("> Protocol Init\n");
           return 0;
 
-        case LWS_CALLBACK_FILTER_NETWORK_CONNECTION:
-          printf("> Filter Network\n");
+        case LWS_CALLBACK_PROTOCOL_DESTROY:
+          printf("> Protocol Destroy\n");
           return 0;
 
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Filter network connection
+        // ------------------------------------------------------------------------------------------------------------
+        case LWS_CALLBACK_FILTER_NETWORK_CONNECTION: {
+          // - Get remote address
+          sockaddr_storage  remote_addr;
+          socklen_t         remote_size = sizeof(remote_addr);
+          if (getpeername(*reinterpret_cast<int*>(&payload), reinterpret_cast<sockaddr*>(&remote_addr), &remote_size)) {
+            // - Drop connection if unable to get remote address
+            return 1;
+          }
 
+          // - Select address type
+          switch (remote_addr.ss_family) {
+            case AF_INET: {
+              //sockaddr_in* ipv4 = reinterpret_cast<sockaddr_in*>(&remote_addr);
+              //char buffer[INET_ADDRSTRLEN];
+              //inet_ntop(AF_INET, &(remote_addr.sin_addr), buffer, INET_ADDRSTRLEN);
+
+
+            }; break;
+            case AF_INET6: {
+              //sockaddr_in6* ipv6 = reinterpret_cast<sockaddr_in6*>(&remote_addr);
+
+            }; break;
+
+            // - Drop connection on unknown socket addrress family
+            default: return 1;
+          }
+
+          // - Accept connection
+          return 0;
+        }; break;
+
+
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Client instance created
+        // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_SERVER_NEW_CLIENT_INSTANTIATED:
-          printf("> New client instance\n");
+          //printf("> New client instance\n");
           return 0;
+
 
         case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
-          printf("> Filter protocol\n");
+          //printf("> Filter protocol\n");
           return 0;
 
 
@@ -354,6 +505,7 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_ESTABLISHED: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
+          server->onConnected(session);
           session->onConnected();
         }; break;
 
@@ -363,20 +515,25 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_RECEIVE: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
-          session->onReceive(reinterpret_cast<const std::uint8_t*>(payload), payload_size, lws_remaining_packet_payload(wsi));
+          std::size_t remaining_payload_size = lws_remaining_packet_payload(wsi);
+          server->onReceive(session, reinterpret_cast<const std::uint8_t*>(payload), payload_size, remaining_payload_size);
+          session->onReceive(reinterpret_cast<const std::uint8_t*>(payload), payload_size, remaining_payload_size);
         }; break;
 
-
-        case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
-          printf("> Close request\n");
-          break;
-
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Close session request received
+        // ------------------------------------------------------------------------------------------------------------
+        case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE: {
+          PWebSocketSession session = server->findSessionByWSI(wsi);
+          return session->onDisconnectRequested() ? 0 : 1;
+        }; break;
 
         // ------------------------------------------------------------------------------------------------------------
         // --- Connection closed
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_CLOSED: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
+          server->onDisconnected(session);
           session->onDisconnected();
         }; break;
 
@@ -387,24 +544,22 @@ namespace websocketspp {
           server->destorySession(wsi);
           break;
 
-
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Unknown callback
+        // ------------------------------------------------------------------------------------------------------------
         default:
-          printf("*** %ld\n", (std::size_t)reason);
+          printf("*** Not implemented WebSocket callback reason: %ld\n", (std::size_t)reason);
           break;
       }
-
       return 0;
-
-
-      // - Forwad call into WebSocket object
-      //return websocket_ptr->__onEvent__(reason, user_data, payload, payload_len);
     }
 
   public:
 
     //! Constructor
     WebSocketServer()
-    : WebSocket(WebSocketSession::Mode::Server) {
+    : WebSocket(Mode::Server)
+    , _update_timeout(10) {
       // - Release context info
       memset(&_context_options, 0x00, sizeof(_context_options));
 
@@ -414,7 +569,10 @@ namespace websocketspp {
 
     //! Destructor
     ~WebSocketServer() {
+      stop();
     }
+
+  public:
 
     //! Add new protocol
     bool addProtocol(const WebSocketProtocol& protocol) {
@@ -474,11 +632,29 @@ namespace websocketspp {
       getContextOptions()->timeout_secs = timeout_sec;
     }
 
+    //! Set update timeout
+    void setUpdateTimeout(std::uint32_t timeout) {
+      _update_timeout = timeout;
+    }
 
-    //! Start WebSocket
-    bool start() {
+    //! Get update timeout
+    std::uint32_t getUpdateTimeout() const {
+      return _update_timeout;
+    }
+
+  public:
+
+    //! Start WebSocket server
+    bool start() override {
+      // - Check state
+      if (getRunningState() != RunningState::Stopped) return false;
+      setRunningState(RunningState::Starting);
+
       // - Check is protocols set
-      if (_protocols.empty()) return false;
+      if (_protocols.empty()) {
+        setRunningState(RunningState::Stopped);
+        return false;
+      }
 
       // - Build protocols collection
       _protocols_plain.clear();
@@ -508,20 +684,47 @@ namespace websocketspp {
       setContext(lws_create_context(getContextOptions()));
 
       // - Check is context created
-      if (!getContext()) return false;
-      return true;
+      if (!getContext()) {
+        setRunningState(RunningState::Stopped);
+        return false;
+      } else {
+        setRunningState(RunningState::Running);
+        return true;
+      }
     }
 
-
     //! Update server
-    void update() {
-      lws_service(getContext(), 50);
+    void update() override {
+      // - Update only running server
+      if (getRunningState() != RunningState::Running) return;
+
+      // - Update LWS
+      lws_service(getContext(), _update_timeout);
+    }
+
+    //! Stop server
+    bool stop() override {
+      // - Stop only running server
+      if (getRunningState() != RunningState::Running) return false;
+      setRunningState(RunningState::Stopping);
+
+      // - Disconnect all active sessions
+      destoryContext();
+
+      // - Cleanup
+      _protocols_plain.clear();
+
+      // - Stopped
+      setRunningState(RunningState::Stopped);
+      return true;
     }
   };
 
-
-
+  //! WebSocket client
   class WebSocketClient : public WebSocket {
+
+  private:
+    //! Constructor
     WebSocketClient() {
 
 
