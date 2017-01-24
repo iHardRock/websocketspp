@@ -8,7 +8,11 @@
 #include <map>
 #include <libwebsockets.h>
 #include <uuidpp.h>
+
 namespace websocketspp {
+  #define WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE 65536
+  #define WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE 65536
+
   //! WebSocket instance
   class WebSocket;
 
@@ -120,6 +124,16 @@ namespace websocketspp {
       return _state;
     }
 
+    //! Get default TX buffer size
+    static constexpr std::size_t getDefaultTXBufferSize() {
+      return WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE;
+    }
+
+    //! Get default RX buffer size
+    static constexpr std::size_t getDefaultRXBufferSize() {
+      return WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE;
+    }
+
   public:
     //! Start WebSocket
     virtual bool start() = 0;
@@ -139,7 +153,7 @@ namespace websocketspp {
     {}
 
     //! On data received
-    virtual void onReceive(PWebSocketSession session, const std::uint8_t* buffer, std::size_t buffer_size, std::size_t awaiting_size)
+    virtual void onReceive(PWebSocketSession session, const std::uint8_t* buffer, std::size_t buffer_size, std::size_t awaiting_size, bool is_final_fragment)
     {}
   };
 
@@ -161,6 +175,13 @@ namespace websocketspp {
 
     //! TX Buffer
     std::vector<std::uint8_t> _tx_buffer;
+
+    //! TX Mutex
+    std::recursive_mutex      _tx_mutex;
+
+    //! Shutdown flag
+    bool                      _is_shutting_down;
+
   private:
 
     //! Initialize session at creation
@@ -169,7 +190,18 @@ namespace websocketspp {
       _session    = session;
       _session_id = session_id;
       _socket     = socket_ptr;
-      _tx_buffer.resize(LWS_PRE + 2);
+      _tx_buffer.resize(LWS_PRE + WebSocket::getDefaultTXBufferSize());
+    }
+
+    //! Shutdown session
+    void __shutdown__() {
+      _is_shutting_down = true;
+    }
+
+    //! On server become writtable
+    void __onWrittable__() {
+
+
     }
 
   public:
@@ -178,6 +210,7 @@ namespace websocketspp {
     WebSocketSession()
     : _mode(WebSocket::Mode::Unknown)
     , _session(nullptr)
+    , _is_shutting_down(false)
     {}
 
     //! Get WebSocket mode
@@ -188,6 +221,11 @@ namespace websocketspp {
     //! Get pointer to session
     PWebSocketSession pointer() {
       return shared_from_this();
+    }
+
+    template < typename SessionType >
+    std::shared_ptr<SessionType> pointer() {
+      return std::dynamic_pointer_cast<SessionType>(pointer());
     }
 
     //! Get pointer to socket
@@ -202,63 +240,84 @@ namespace websocketspp {
 
     //! Send data
     bool send(const std::uint8_t* buffer, std::size_t buffer_size, bool binary_mode = false) {
-      // - Bytes sent counter
-      std::size_t bytes_sent = 0;
+      // - Check is shutting down
+      if (_is_shutting_down) return false;
 
-      // - Is message chunked
-      bool chunked = false;
+      // - Send data procedure
+      try {
+        std::lock_guard<std::recursive_mutex> lock(_tx_mutex);
 
-      // - Send splitted to chunks by TX buffer size
-      while (buffer_size) {
-        // - Calculate portion size
-        std::size_t portion_size = std::min(buffer_size, _tx_buffer.size() - LWS_PRE);
+        // - Bytes sent counter
+        std::size_t bytes_sent = 0;
 
-        // - Copy next portion into buffer
-        memcpy(&_tx_buffer[LWS_PRE], &buffer[bytes_sent], portion_size);
+        // - Is message chunked
+        bool chunked = false;
 
-        // - Check is need more chunks
-        bool more_chunks = (buffer_size - portion_size);
+        // - Send splitted to chunks by TX buffer size
+        while (buffer_size) {
+          // - Check is shutting down
+          if (_is_shutting_down) return false;
 
-        // - Setup flags
-        lws_write_protocol flags = binary_mode ? LWS_WRITE_BINARY : LWS_WRITE_TEXT;
+          // - Calculate portion size
+          std::size_t portion_size = std::min(buffer_size, _tx_buffer.size() - LWS_PRE);
 
-        // - Send continuation frame if chunked
-        if (chunked) flags = more_chunks
-          ? static_cast<lws_write_protocol>(LWS_WRITE_CONTINUATION | LWS_WRITE_NO_FIN)  // - Need more chunks
-          : static_cast<lws_write_protocol>(LWS_WRITE_CONTINUATION)                     // - Last chunk
-        ;
+          // - Copy next portion into buffer
+          memcpy(&_tx_buffer[LWS_PRE], &buffer[bytes_sent], portion_size);
 
-        // - Detect first chunk
-        if (more_chunks && !chunked) {
-          flags   =  (lws_write_protocol)((int)flags | LWS_WRITE_NO_FIN);               // - First chunk
-          chunked = true;
+          // - Check is need more chunks
+          bool more_chunks = (buffer_size - portion_size);
+
+          // - Setup flags
+          lws_write_protocol flags = binary_mode ? LWS_WRITE_BINARY : LWS_WRITE_TEXT;
+
+          // - Send continuation frame if chunked
+          if (chunked) flags = more_chunks
+            ? static_cast<lws_write_protocol>(LWS_WRITE_CONTINUATION | LWS_WRITE_NO_FIN)  // - Need more chunks
+            : static_cast<lws_write_protocol>(LWS_WRITE_CONTINUATION)                     // - Last chunk
+          ;
+
+          // - Detect first chunk
+          if (more_chunks && !chunked) {
+            flags   =  (lws_write_protocol)((int)flags | LWS_WRITE_NO_FIN);               // - First chunk
+            chunked = true;
+          }
+
+          // - Send data
+          int tx_size = lws_write(_session, &_tx_buffer[LWS_PRE], portion_size, flags);
+          if (tx_size== -1) {
+            // - TODO: Close connection
+            __shutdown__();
+            return false;
+          }
+
+          // - Wait for socket become writtable
+          while (lws_send_pipe_choked(_session) || lws_partial_buffered(_session)) usleep(1);
+
+          // - Go to next chunk
+          bytes_sent  += tx_size;
+          buffer_size -= tx_size;
         }
-
-        // - Send data
-        if (lws_write(_session, &_tx_buffer[LWS_PRE], portion_size, flags ) == -1) {
-          // - TODO: Close connection
-          return false;
-        }
-
-        // - Go to next chunk
-        bytes_sent  += portion_size;
-        buffer_size -= portion_size;
+        return true;
+      } catch (const std::exception& e) {
+        // - Close connection
+        __shutdown__();
+        return false;
       }
-      return true;
     }
 
   public:
 
     //! On connection established
-    virtual void onConnected() {}
+    virtual void onConnected()
+    {}
 
     //! On data received
-    virtual void onReceive(const std::uint8_t* buffer, std::size_t buffer_size, std::size_t awaiting_size) {
-      printf("> Receive [%ld/%ld]: \n", buffer_size, awaiting_size);
-    }
+    virtual void onReceive(const std::uint8_t* buffer, std::size_t buffer_size, std::size_t awaiting_size, bool is_final_fragment)
+    {}
 
     //! On connection closed
-    virtual void onDisconnected() {}
+    virtual void onDisconnected()
+    {}
 
     //! On disconnect packet received
     virtual bool onDisconnectRequested() {
@@ -288,7 +347,7 @@ namespace websocketspp {
     WebSocketProtocol()
     : _protocol_id(0)
     , _protocol_name("default")
-    , _rx_buffer_size(0)
+    , _rx_buffer_size(WebSocket::getDefaultRXBufferSize())
     , _per_session_data_size(0)
     { }
 
@@ -343,6 +402,9 @@ namespace websocketspp {
     //! Pointer to WebSocket
     typedef std::shared_ptr<WebSocketServer<SessionType>> ptr;
 
+    //! Pointer to session
+
+
   private:
     //! Context creation info
     lws_context_creation_info                 _context_options;
@@ -370,6 +432,11 @@ namespace websocketspp {
 
     //! Update timeout
     std::uint32_t                             _update_timeout;
+
+    #ifdef __WITH_ACTIVITY__
+    //! Server activity
+    activity<WebSocketServer<SessionType>>    _server_activity;
+    #endif
 
   private:
 
@@ -515,9 +582,18 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_RECEIVE: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
-          std::size_t remaining_payload_size = lws_remaining_packet_payload(wsi);
-          server->onReceive(session, reinterpret_cast<const std::uint8_t*>(payload), payload_size, remaining_payload_size);
-          session->onReceive(reinterpret_cast<const std::uint8_t*>(payload), payload_size, remaining_payload_size);
+          std::size_t remaining_payload_size  = lws_remaining_packet_payload(wsi);
+          bool        is_final_fragment       = lws_is_final_fragment(wsi);
+          server->onReceive(session, reinterpret_cast<const std::uint8_t*>(payload), payload_size, remaining_payload_size, is_final_fragment);
+          session->onReceive(reinterpret_cast<const std::uint8_t*>(payload), payload_size, remaining_payload_size, is_final_fragment);
+        }; break;
+
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Server become writtable
+        // ------------------------------------------------------------------------------------------------------------
+        case LWS_CALLBACK_SERVER_WRITEABLE: {
+          PWebSocketSession session = server->findSessionByWSI(wsi);
+          session->__onWrittable__();
         }; break;
 
         // ------------------------------------------------------------------------------------------------------------
@@ -525,6 +601,7 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
+          session->__shutdown__();
           return session->onDisconnectRequested() ? 0 : 1;
         }; break;
 
@@ -533,6 +610,7 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_CLOSED: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
+          session->__shutdown__();
           server->onDisconnected(session);
           session->onDisconnected();
         }; break;
@@ -559,7 +637,11 @@ namespace websocketspp {
     //! Constructor
     WebSocketServer()
     : WebSocket(Mode::Server)
-    , _update_timeout(10) {
+    , _update_timeout(10)
+    #ifdef __WITH_ACTIVITY__
+    , _server_activity(this, &WebSocketServer::__serverActivity__)
+    #endif
+    {
       // - Release context info
       memset(&_context_options, 0x00, sizeof(_context_options));
 
@@ -572,6 +654,17 @@ namespace websocketspp {
       stop();
     }
 
+    #ifdef __WITH_ACTIVITY__
+  private:
+    //! Server activity
+    void __serverActivity__() {
+      while (_server_activity.running()) try {
+        _server_activity.__cancel_point__();
+        update();
+      } catch (const std::exception& e) {}
+    }
+    #endif
+
   public:
 
     //! Add new protocol
@@ -580,6 +673,14 @@ namespace websocketspp {
       if (_protocols.find(protocol.getName()) != _protocols.end()) return false;
       _protocols[protocol.getName()] = protocol;
       return true;
+    }
+
+    //! Get protocol by name
+    WebSocketProtocol* getProtocol(const std::string& name) {
+      // - Find protocol
+      auto i_protocol = _protocols.find(name);
+      if (i_protocol == _protocols.end()) return nullptr;
+      else return &i_protocol->second;
     }
 
     //! Remove protocol
@@ -693,6 +794,17 @@ namespace websocketspp {
       }
     }
 
+    #ifdef __WITH_ACTIVITY__
+    //! Start standalone server with own thread
+    bool startStandalone() {
+      if (!start()) return false;
+
+      // - Run activity
+      _server_activity.start();
+      return true;
+    }
+    #endif
+
     //! Update server
     void update() override {
       // - Update only running server
@@ -708,6 +820,10 @@ namespace websocketspp {
       if (getRunningState() != RunningState::Running) return false;
       setRunningState(RunningState::Stopping);
 
+      #ifdef __WITH_ACTIVITY__
+      _server_activity.stop();
+      #endif
+
       // - Disconnect all active sessions
       destoryContext();
 
@@ -717,6 +833,18 @@ namespace websocketspp {
       // - Stopped
       setRunningState(RunningState::Stopped);
       return true;
+    }
+
+  public:
+
+    //! Get active sessions
+    std::vector<PWebSocketSession> getActiveSessions() {
+      std::lock_guard<std::mutex> lock(_sessions_mutex);
+      std::vector<PWebSocketSession> result;
+      for (auto& i_session : _sessions_by_id) {
+        result.push_back(i_session.second);
+      }
+      return std::move(result);
     }
   };
 
