@@ -114,6 +114,12 @@ namespace websocketspp {
       return shared_from_this();
     }
 
+    //! Get pointer to socket of specified type
+    template < typename SocketType >
+    std::shared_ptr<SocketType> pointer() {
+      return std::dynamic_pointer_cast<SocketType>(pointer());
+    }
+
     //! Get WebSocket mode
     Mode getMode() const {
       return _mode;
@@ -401,9 +407,6 @@ namespace websocketspp {
   public:
     //! Pointer to WebSocket
     typedef std::shared_ptr<WebSocketServer<SessionType>> ptr;
-
-    //! Pointer to session
-
 
   private:
     //! Context creation info
@@ -744,6 +747,15 @@ namespace websocketspp {
     }
 
   public:
+    //! On server start handler
+    virtual void onStart()
+    {}
+
+    //! On server stop handler
+    virtual void onStop()
+    {}
+
+  public:
 
     //! Start WebSocket server
     bool start() override {
@@ -789,6 +801,8 @@ namespace websocketspp {
         setRunningState(RunningState::Stopped);
         return false;
       } else {
+        // - Started
+        onStart();
         setRunningState(RunningState::Running);
         return true;
       }
@@ -831,6 +845,7 @@ namespace websocketspp {
       _protocols_plain.clear();
 
       // - Stopped
+      onStop();
       setRunningState(RunningState::Stopped);
       return true;
     }
