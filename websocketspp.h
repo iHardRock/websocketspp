@@ -12,6 +12,8 @@
 namespace websocketspp {
   #define WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE 65536
   #define WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE 65536
+  //! WebSocket Protocol
+  class WebSocketProtocol;
 
   //! WebSocket instance
   class WebSocket;
@@ -30,6 +32,93 @@ namespace websocketspp {
 
   //! WebSocket client
   class WebSocketClient;
+
+
+  //! WebSocket protocol information
+  class WebSocketProtocol {
+  private:
+
+    //! Protocol identifier
+    std::uint32_t   _protocol_id;
+
+    //! Protocol name
+    std::string     _protocol_name;
+
+    //! Receive buffer size
+    std::size_t     _rx_buffer_size;
+
+    //! Transmit buffer size
+    std::size_t     _tx_buffer_size;
+
+    //! Per-session data size
+    std::size_t     _per_session_data_size;
+
+  public:
+
+    //! Constructor
+    WebSocketProtocol()
+    : _protocol_id(0)
+    , _protocol_name("default")
+    , _rx_buffer_size(WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE)
+    , _tx_buffer_size(WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE)
+    , _per_session_data_size(0)
+    { }
+
+    //! Get protocol name
+    const std::string& getName() const {
+      return _protocol_name;
+    }
+
+    //! Get receive buffer size
+    std::size_t getReceiveBufferSize() const {
+      return _rx_buffer_size;
+    }
+
+    //! Get transmit buffer size
+    std::size_t getTransmitBufferSize() const {
+      return _tx_buffer_size;
+    }
+
+    //! Get protocol identifier
+    std::uint32_t getProtocolId() const {
+      return _protocol_id;
+    }
+
+    std::size_t getPerSessionDataSize() const {
+      return _per_session_data_size;
+    }
+
+    //! Set protocol name
+    WebSocketProtocol& setName(const std::string& name) {
+      _protocol_name = name;
+      return *this;
+    }
+
+    //! Set protocol identifier
+    WebSocketProtocol& setProtocolId(std::uint32_t id) {
+      _protocol_id = id;
+      return *this;
+    }
+
+    //! Set receive buffer size
+    WebSocketProtocol& setReceiveBufferSize(std::size_t buffer_size) {
+      _rx_buffer_size = buffer_size;
+      return *this;
+    }
+
+    //! Set transmit buffer size
+    WebSocketProtocol& setTransmitBufferSize(std::size_t buffer_size) {
+      _tx_buffer_size = buffer_size;
+      return *this;
+    }
+
+    //! Set per-session data size
+    WebSocketProtocol& setPerSessionDataSize(std::size_t data_size) {
+      _per_session_data_size = data_size;
+      return *this;
+    }
+  };
+
 
   //! WebSocket base class
   class WebSocket : public std::enable_shared_from_this<WebSocket> {
@@ -54,13 +143,13 @@ namespace websocketspp {
 
   private:
     //! WebSocket mode
-    Mode            _mode;
+    Mode                _mode;
 
     //! Context
-    lws_context*    _context;
+    lws_context*        _context;
 
     //! WebSocket state
-    RunningState    _state;
+    RunningState        _state;
 
   protected:
 
@@ -87,6 +176,7 @@ namespace websocketspp {
     void setRunningState(RunningState state) {
       _state = state;
     }
+
 
   public:
 
@@ -124,6 +214,8 @@ namespace websocketspp {
     Mode getMode() const {
       return _mode;
     }
+
+
 
     //! Get running state
     RunningState getRunningState() const {
@@ -188,6 +280,8 @@ namespace websocketspp {
     //! Shutdown flag
     bool                      _is_shutting_down;
 
+    //! Connection protocol
+    WebSocketProtocol*        _protocol;
   private:
 
     //! Initialize session at creation
@@ -196,7 +290,7 @@ namespace websocketspp {
       _session    = session;
       _session_id = session_id;
       _socket     = socket_ptr;
-      _tx_buffer.resize(LWS_PRE + WebSocket::getDefaultTXBufferSize());
+
     }
 
     //! Shutdown session
@@ -207,9 +301,15 @@ namespace websocketspp {
     //! On server become writtable
     void __onWrittable__() {
 
-
     }
 
+    //! Set current protocol
+    void __setProtocol__(WebSocketProtocol* protocol) {
+      _protocol = protocol;
+
+      // - Prepare TX buffer
+      _tx_buffer.resize(LWS_PRE + protocol->getTransmitBufferSize());
+    }
   public:
 
     //! Constructor
@@ -217,11 +317,17 @@ namespace websocketspp {
     : _mode(WebSocket::Mode::Unknown)
     , _session(nullptr)
     , _is_shutting_down(false)
+    , _protocol(nullptr)
     {}
 
     //! Get WebSocket mode
     WebSocket::Mode getMode() const {
       return _mode;
+    }
+
+    //! Access current protocol
+    WebSocketProtocol* getProtocol() const {
+      return _protocol;
     }
 
     //! Get pointer to session
@@ -331,75 +437,6 @@ namespace websocketspp {
     }
   };
 
-  //! WebSocket protocol information
-  class WebSocketProtocol {
-  private:
-
-    //! Protocol identifier
-    std::uint32_t   _protocol_id;
-
-    //! Protocol name
-    std::string     _protocol_name;
-
-    //! Receive buffer size
-    std::size_t     _rx_buffer_size;
-
-    //! Per-session data size
-    std::size_t     _per_session_data_size;
-
-  public:
-
-    //! Constructor
-    WebSocketProtocol()
-    : _protocol_id(0)
-    , _protocol_name("default")
-    , _rx_buffer_size(WebSocket::getDefaultRXBufferSize())
-    , _per_session_data_size(0)
-    { }
-
-    //! Get protocol name
-    const std::string& getName() const {
-      return _protocol_name;
-    }
-
-    //! Get receive buffer size
-    std::size_t getReceiveBufferSize() const {
-      return _rx_buffer_size;
-    }
-
-    //! Get protocol identifier
-    std::uint32_t getProtocolId() const {
-      return _protocol_id;
-    }
-
-    std::size_t getPerSessionDataSize() const {
-      return _per_session_data_size;
-    }
-
-    //! Set protocol name
-    WebSocketProtocol& setName(const std::string& name) {
-      _protocol_name = name;
-      return *this;
-    }
-
-    //! Set protocol identifier
-    WebSocketProtocol& setProtocolId(std::uint32_t id) {
-      _protocol_id = id;
-      return *this;
-    }
-
-    //! Set receive buffer size
-    WebSocketProtocol& setReceiveBufferSize(std::size_t buffer_size) {
-      _rx_buffer_size = buffer_size;
-      return *this;
-    }
-
-    //! Set per-session data size
-    WebSocketProtocol& setPerSessionDataSize(std::size_t data_size) {
-      _per_session_data_size = data_size;
-      return *this;
-    }
-  };
 
   //! WebSocket server
   template < class SessionType >
@@ -564,10 +601,14 @@ namespace websocketspp {
           //printf("> New client instance\n");
           return 0;
 
-
-        case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION:
-          //printf("> Filter protocol\n");
-          return 0;
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Setup connection protocol
+        // ------------------------------------------------------------------------------------------------------------
+        case LWS_CALLBACK_FILTER_PROTOCOL_CONNECTION: {
+          WebSocketProtocol*  protocol  = server->getProtocol(user_data ? reinterpret_cast<const char*>(user_data) : "default");
+          PWebSocketSession   session   = server->findSessionByWSI(wsi);
+          session->__setProtocol__(protocol);
+        }; return 0;
 
 
         // ------------------------------------------------------------------------------------------------------------
@@ -717,7 +758,7 @@ namespace websocketspp {
 
     //! Set timeout before next keep-alive retry
     void setKeepAliveRetryTimeout(std::uint32_t timeout_sec) {
-      getContextOptions()->ka_time = timeout_sec;
+      getContextOptions()->ka_interval = timeout_sec;
     }
 
     //! Set server virtual host name
