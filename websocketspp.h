@@ -565,8 +565,9 @@ namespace websocketspp {
         case LWS_CALLBACK_FILTER_NETWORK_CONNECTION: {
           // - Get remote address
           sockaddr_storage  remote_addr;
-          socklen_t         remote_size = sizeof(remote_addr);
-          if (getpeername(*reinterpret_cast<int*>(&payload), reinterpret_cast<sockaddr*>(&remote_addr), &remote_size)) {
+          socklen_t         remote_size   = sizeof(remote_addr);
+          int*              socket_handle = reinterpret_cast<int*>(&payload);
+          if (getpeername(*socket_handle, reinterpret_cast<sockaddr*>(&remote_addr), &remote_size)) {
             // - Drop connection if unable to get remote address
             return 1;
           }
