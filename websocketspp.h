@@ -704,7 +704,6 @@ namespace websocketspp {
     //! Server activity
     void __serverActivity__() {
       while (_server_activity.running()) try {
-        _server_activity.__cancel_point__();
         update();
       } catch (const std::exception& e) {}
     }
