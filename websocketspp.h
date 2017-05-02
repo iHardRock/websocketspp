@@ -552,11 +552,11 @@ namespace websocketspp {
           break;
 
         case LWS_CALLBACK_PROTOCOL_INIT:
-          printf("> Protocol Init\n");
+          //printf("> Protocol Init\n");
           return 0;
 
         case LWS_CALLBACK_PROTOCOL_DESTROY:
-          printf("> Protocol Destroy\n");
+          //printf("> Protocol Destroy\n");
           return 0;
 
         // ------------------------------------------------------------------------------------------------------------
