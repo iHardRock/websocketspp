@@ -351,7 +351,7 @@ namespace websocketspp {
     }
 
     //! Send data
-    bool send(const std::uint8_t* buffer, std::size_t buffer_size, bool binary_mode = false) {
+    virtual bool send(const std::uint8_t* buffer, std::size_t buffer_size, bool binary_mode = false) {
       // - Check is shutting down
       if (_is_shutting_down) return false;
 
