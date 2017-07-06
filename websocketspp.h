@@ -7,8 +7,13 @@
 #include <vector>
 #include <map>
 #include <libwebsockets.h>
-#include <uuidpp.h>
 
+// - Use uuidpp library if UUID class not defined
+#ifndef __WITH_UUIDPP__
+  #include <uuidpp.h>
+#endif
+
+//! WebSockets C++ Library
 namespace websocketspp {
   #define WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE 65536
   #define WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE 65536
