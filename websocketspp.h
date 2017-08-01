@@ -220,8 +220,6 @@ namespace websocketspp {
       return _mode;
     }
 
-
-
     //! Get running state
     RunningState getRunningState() const {
       return _state;
@@ -907,6 +905,15 @@ namespace websocketspp {
       }
       return std::move(result);
     }
+
+    //! Send message to all connected sessions
+    void broadcast(const std::uint8_t* buffer, std::size_t size) {
+      std::lock_guard<std::mutex> lock(_sessions_mutex);
+      for (auto& i_session : _sessions_by_id) {
+        i_session.second->send(buffer, size);
+      }
+    }
+
   };
 
   //! WebSocket client
