@@ -913,7 +913,6 @@ namespace websocketspp {
         i_session.second->send(buffer, size);
       }
     }
-
   };
 
   //! WebSocket client
