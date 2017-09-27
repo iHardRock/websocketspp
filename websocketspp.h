@@ -471,7 +471,7 @@ namespace websocketspp {
     std::map<lws*, PWebSocketSession>         _sessions_by_wsi;
 
     //! Active sessions mutex
-    std::mutex                                _sessions_mutex;
+    mutable std::mutex                        _sessions_mutex;
 
     //! Update timeout
     std::uint32_t                             _update_timeout;
@@ -912,6 +912,12 @@ namespace websocketspp {
       for (auto& i_session : _sessions_by_id) {
         i_session.second->send(buffer, size);
       }
+    }
+
+    //! Get sessions count
+    std::size_t getActiveSessionsCount() const {
+      std::lock_guard<std::mutex> lock(_sessions_mutex);
+      return _sessions_by_id.size();
     }
   };
 
