@@ -38,7 +38,6 @@ namespace websocketspp {
   //! WebSocket client
   class WebSocketClient;
 
-
   //! WebSocket protocol information
   class WebSocketProtocol {
   private:
@@ -263,10 +262,10 @@ namespace websocketspp {
   template <class SessionType> friend class WebSocketServer;
   private:
     //! WebSocket mode
-    WebSocket::Mode           _mode;
+    WebSocket::Mode           _mode = WebSocket::Mode::Unknown;
 
     //! Session object
-    lws*                      _session;
+    lws*                      _session = nullptr;
 
     //! Session identifier
     UUID                      _session_id;
@@ -278,13 +277,16 @@ namespace websocketspp {
     std::vector<std::uint8_t> _tx_buffer;
 
     //! TX Mutex
-    std::recursive_mutex      _tx_mutex;
+    std::mutex                _tx_mutex;
 
     //! Shutdown flag
-    bool                      _is_shutting_down;
+    bool                      _is_shutting_down = false;
+
+    //! Is session ready for IO
+    bool                      _is_connected = false;
 
     //! Connection protocol
-    WebSocketProtocol*        _protocol;
+    WebSocketProtocol*        _protocol = nullptr;
   private:
 
     //! Initialize session at creation
@@ -313,14 +315,20 @@ namespace websocketspp {
       // - Prepare TX buffer
       _tx_buffer.resize(LWS_PRE + protocol->getTransmitBufferSize());
     }
+
+    //! Set connected flag
+    void __setConnected__(bool connected) {
+      _is_connected = connected;
+    }
+
+    //! Get connected flag
+    bool __isConnected__() const {
+      return _is_connected;
+    }
   public:
 
     //! Constructor
     WebSocketSession()
-    : _mode(WebSocket::Mode::Unknown)
-    , _session(nullptr)
-    , _is_shutting_down(false)
-    , _protocol(nullptr)
     {}
 
     //! Get WebSocket mode
@@ -355,13 +363,13 @@ namespace websocketspp {
 
     //! Send data
     virtual bool send(const std::uint8_t* buffer, std::size_t buffer_size, bool binary_mode = false) {
+      std::lock_guard<std::mutex> lock(_tx_mutex);
+
       // - Check is shutting down
-      if (_is_shutting_down) return false;
+      if (_is_shutting_down || !_is_connected) return false;
 
       // - Send data procedure
       try {
-        std::lock_guard<std::recursive_mutex> lock(_tx_mutex);
-
         // - Bytes sent counter
         std::size_t bytes_sent = 0;
 
@@ -620,6 +628,7 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_ESTABLISHED: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
+          session->__setConnected__(true);
           server->onConnected(session);
           session->onConnected();
         }; break;
@@ -649,8 +658,10 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
-          session->__shutdown__();
-          return session->onDisconnectRequested() ? 0 : 1;
+          if (session) {
+            session->__shutdown__();
+            return session->onDisconnectRequested() ? 0 : 1;
+          }
         }; break;
 
         // ------------------------------------------------------------------------------------------------------------
@@ -658,9 +669,13 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_CLOSED: {
           PWebSocketSession session = server->findSessionByWSI(wsi);
-          session->__shutdown__();
-          server->onDisconnected(session);
-          session->onDisconnected();
+          if (session) {
+            session->__shutdown__();
+            if (session->__isConnected__()) {
+              server->onDisconnected(session);
+              session->onDisconnected();
+            }
+          }
         }; break;
 
         // ------------------------------------------------------------------------------------------------------------
@@ -668,6 +683,12 @@ namespace websocketspp {
         // ------------------------------------------------------------------------------------------------------------
         case LWS_CALLBACK_WSI_DESTROY:
           server->destorySession(wsi);
+          break;
+
+        // ------------------------------------------------------------------------------------------------------------
+        // --- Set extra headers
+        // ------------------------------------------------------------------------------------------------------------
+        case LWS_CALLBACK_ADD_HEADERS:
           break;
 
         // ------------------------------------------------------------------------------------------------------------
