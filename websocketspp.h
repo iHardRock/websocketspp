@@ -15,8 +15,8 @@
 
 //! WebSockets C++ Library
 namespace websocketspp {
-  #define WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE 65536
-  #define WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE 65536
+  #define WEBSOCKETSPP_DEFAULT_TX_BUFFER_SIZE 1048576
+  #define WEBSOCKETSPP_DEFAULT_RX_BUFFER_SIZE 1048576
   //! WebSocket Protocol
   class WebSocketProtocol;
 
